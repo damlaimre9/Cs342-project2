@@ -35,6 +35,10 @@ char ALG[5];                           // Scheduling algorithm ('FCFS', 'SJF')
 int OUTMODE = 1;                       // Output mode
 int simulation_finished = 0;           // Flag to indicate simulation end
 
+int processors_ready = 0;
+pthread_mutex_t processors_ready_mutex;
+pthread_cond_t processors_ready_cond;
+
 long get_current_time_ms() {
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
@@ -57,16 +61,26 @@ void *processor_thread(void *arg) {
     int cpu_id = *((int *)arg);               // CPU ID for this thread
     int queue_index = (SAP == 'S') ? 0 : cpu_id - 1;
     queue_t *queue = &queues[queue_index];    // Associated queue
+    
+
+
+        // Signal that this processor thread is ready
+        pthread_mutex_lock(&processors_ready_mutex);
+        processors_ready++;
+        if (processors_ready == N) {
+            pthread_cond_signal(&processors_ready_cond);
+        }
+        pthread_mutex_unlock(&processors_ready_mutex);
 
     while (1) {
         pthread_mutex_lock(&queue->lock);
-        while (queue->head == NULL) {
-            if (simulation_finished) {
-                pthread_mutex_unlock(&queue->lock);
-                pthread_exit(NULL);           // Terminate if simulation is finished
-            }
-            pthread_cond_wait(&queue->cond, &queue->lock);  // Wait for bursts
+        while (queue->head == NULL && !simulation_finished) {
+               pthread_cond_wait(&queue->cond, &queue->lock);  // Wait for bursts
         }
+          if (queue->head == NULL && simulation_finished) {
+          pthread_mutex_unlock(&queue->lock);
+          pthread_exit(NULL);           // Terminate if simulation is finished and queue is empty
+          }
 
         // Select a burst according to the scheduling algorithm
         burst_t *selected_burst = NULL;
@@ -136,6 +150,8 @@ int main(int argc, char *argv[]) {
     int use_random = 0;
     int T, T1, T2, L, L1, L2, PC;
     char *OUTFILE = NULL;
+    
+    
 
     // Initialize mutex for finished bursts
     pthread_mutex_init(&finished_bursts_lock, NULL);
@@ -210,8 +226,7 @@ int main(int argc, char *argv[]) {
     // Seed random number generator
     srand(time(NULL));
 
-    // Initialize simulation start time
-    gettimeofday(&simulation_start_time, NULL);
+    
 
     // Initialize queues
     if (SAP == 'S') {
@@ -227,7 +242,9 @@ int main(int argc, char *argv[]) {
             pthread_cond_init(&queues[i].cond, NULL);
         }
     }
-
+    pthread_mutex_init(&processors_ready_mutex, NULL);
+    pthread_cond_init(&processors_ready_cond, NULL);
+    
     // Create processor threads
     pthread_t *thread_ids = malloc(sizeof(pthread_t) * N);
     int *cpu_ids = malloc(sizeof(int) * N);
@@ -235,7 +252,17 @@ int main(int argc, char *argv[]) {
         cpu_ids[i] = i + 1; // CPU IDs start from 1
         pthread_create(&thread_ids[i], NULL, processor_thread, &cpu_ids[i]);
     }
+    
+    // Wait until all processor threads are ready
+    pthread_mutex_lock(&processors_ready_mutex);
+    while (processors_ready < N) {
+        pthread_cond_wait(&processors_ready_cond, &processors_ready_mutex);
+    }
+    pthread_mutex_unlock(&processors_ready_mutex);
 
+    // Initialize simulation start time
+    gettimeofday(&simulation_start_time, NULL);
+    
     // Main thread processes input bursts
     if (INFILE != NULL) {
         // Read from input file
@@ -460,7 +487,9 @@ int main(int argc, char *argv[]) {
     if (OUTFILE != NULL) {
         fclose(stdout);
     }
-
+    pthread_mutex_destroy(&processors_ready_mutex);
+    pthread_cond_destroy(&processors_ready_cond);
+    
     return 0;
 }
 
